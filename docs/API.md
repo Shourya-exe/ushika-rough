@@ -63,9 +63,9 @@ List endpoints use page-number pagination: `?page=2&page_size=100`. The default 
 | 400 | Validation error | `{"field": ["message", …]}` |
 | 401 | Missing or invalid token | `{"detail": "Authentication credentials were not provided."}` |
 | 403 | Authenticated but not allowed (for example, schema in production for non-staff) | `{"detail": "…"}` |
-| 404 | Unknown id, or file not downloaded | `{"detail": "…"}` |
+| 404 | Unknown id, a file you can't get, or a file type that can't be previewed | `{"detail": "…"}` |
 | 405 | Wrong method | `{"detail": "Method \"GET\" not allowed."}` |
-| 502 | Meta rejected or failed the operation; the record is still stored | the stored resource, with error fields |
+| 502 | Meta rejected or failed the operation; the record is still stored | the stored resource, with error fields (file preview and download: `{"detail": "…"}`) |
 
 Field validation runs first, so cross-field errors (such as missing `text` for a text message) only appear once every field is individually valid.
 
@@ -152,6 +152,7 @@ Inbound and outbound messages, newest first, with attachments inlined.
         "last_error": "",
         "downloaded_at": "2026-10-27T19:19:32.007665Z",
         "download_url": "http://127.0.0.1:8000/api/v1/attachments/1/download/",
+        "preview_url": "http://127.0.0.1:8000/api/v1/attachments/1/preview/",
         "created_at": "2026-10-27T19:19:31.981539Z"
       }],
       "created_at": "2026-10-27T19:19:31.981539Z"
@@ -305,9 +306,20 @@ Inbound media is recorded on arrival (type, MIME type, filename, caption) but th
 | PDF (`document` with MIME type `application/pdf`) | Anyone, if the contact's level has **can save PDFs** |
 | Anything else: audio, video, stickers, Word/Excel and other documents | Superusers only |
 
-A contact with no level has no images or PDFs saved, by anyone. Superusers follow the level rules for images and PDFs too.
+A contact with no level has no images or PDFs saved, by anyone. Superusers follow the level rules for images and PDFs too. These rules are about keeping a file in storage; a superuser can still look at any file without saving it (see [Previewing and downloading](#previewing-and-downloading)).
 
 Setting `WHATSAPP_DOWNLOAD_MEDIA=true` brings back download on arrival, for images and PDFs the contact's level allows (other media still waits for a superuser).
+
+### Previewing and downloading
+
+| | Saved file | Not saved |
+|---|---|---|
+| Superuser | From storage | Fetched from WhatsApp for that request, then discarded |
+| Other users | From storage | `404` |
+
+A superuser can get any file, whatever the contact's level. Fetching an unsaved file runs the same size, hash and HTML checks as a save, doesn't change the attachment and stores nothing, so each request fetches it again. It needs a valid `WHATSAPP_ACCESS_TOKEN` and only works while Meta still holds the file (about 30 days). After that, only saved files can be opened.
+
+In the Django admin, **Media attachments** has Preview and Download links on every row, and opening an attachment shows the preview on its page. A message's page has the same links for its attachments.
 
 ### `GET /api/v1/attachments/`
 | Query | |
@@ -317,17 +329,24 @@ Setting `WHATSAPP_DOWNLOAD_MEDIA=true` brings back download on arrival, for imag
 | `message` | message `id` |
 | `ordering` | `created_at`, `downloaded_at` |
 
-Each item has the same shape as in the message example. `download_url` is `null` until the file is downloaded.
+Each item has the same shape as in the message example. `download_url` is `null` when you can't get the file (it isn't saved and you aren't a superuser). `preview_url` is also `null` when the file type can't be previewed.
 
 ### `GET /api/v1/attachments/{id}/`
 A single attachment.
 
 ### `GET /api/v1/attachments/{id}/download/`
-Streams the stored file:
-- `200` with `Content-Type` set to the attachment's MIME type and `Content-Disposition: attachment; filename="…"`.
-- `404 {"detail": "This attachment has not been downloaded."}` if it isn't downloaded, or `{"detail": "The stored file is missing from storage."}` if the file was removed from disk.
+Streams the file as a download (see [who can get what](#previewing-and-downloading)):
+- `200` with `Content-Type` set to the file's MIME type and `Content-Disposition: attachment; filename="…"`.
+- `404 {"detail": "This attachment has not been downloaded."}` if it isn't saved and you aren't a superuser, or `{"detail": "The stored file is missing from storage."}` if the file was removed from disk.
+- `502 {"detail": "…"}` if an unsaved file couldn't be fetched from WhatsApp. The attachment doesn't change.
 
 This works with any `Accept` header.
+
+### `GET /api/v1/attachments/{id}/preview/`
+The same file with the same access rules, for showing in a browser:
+- `200` with `Content-Disposition: inline; filename="…"`. Pages on the same origin can embed it in a frame.
+- `404 {"detail": "This file type can't be previewed. Download it instead."}` for anything but PDFs, plain text, JPEG, PNG, WebP and GIF images, MP4 and WebM video, and MP3, M4A, AAC, Ogg, Opus and WAV audio. Browsers can't show Word, Excel or PowerPoint files, and HTML, SVG and XML can carry scripts, so those can only be downloaded.
+- The other `404` and `502` responses are the same as for download.
 
 ### `POST /api/v1/attachments/{id}/save/`
 Fetches the file from WhatsApp and saves it to local storage, synchronously. It is also how a failed save is retried; earlier failures and the attempt cap don't block it. No body.

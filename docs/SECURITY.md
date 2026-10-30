@@ -35,7 +35,7 @@ USHIKA handles personal data: phone numbers, names, message content and customer
 
 - Every `/api/v1/` endpoint requires authentication (`IsAuthenticated` by default). Supported: `Authorization: Token <key>` and Django session (admin login).
 - `POST /api/v1/auth/token/` exchanges a username and password for the user's token. Use strong passwords; Django's password validators are on. `GET /api/v1/auth/me/` returns the user a token belongs to, which is how a client checks its login.
-- **Authorization is coarse:** any authenticated user can read all conversations and send messages. The one finer rule covers saving media: images and PDFs only when the contact's level allows it, other media only by a superuser (see [API.md](API.md#saving-media-contact-levels)). That's acceptable for an internal POC with a few trusted operators. Before more users or external clients get access, add per-client scopes or permissions (see open questions in [PRD.md](PRD.md)).
+- **Authorization is coarse:** any authenticated user can read all conversations and send messages. The one finer rule covers saving media: images and PDFs only when the contact's level allows it, other media only by a superuser (see [API.md](API.md#saving-media-contact-levels)). Previewing or downloading a file that isn't saved is superuser-only and ignores the level, because nothing is kept (see [API.md](API.md#previewing-and-downloading)). That's acceptable for an internal POC with a few trusted operators. Before more users or external clients get access, add per-client scopes or permissions (see open questions in [PRD.md](PRD.md)).
 - Outbound sends record `sent_by` (the API user) for accountability.
 - API docs (`/api/schema/`, `/api/docs/`) are public only in DEBUG. In production they require a staff user.
 - **The Django admin has full access.** Grant `is_staff` sparingly, use strong passwords, and consider restricting `/admin/` by network in production.
@@ -52,11 +52,12 @@ Incoming media comes from customers, so treat it as untrusted.
 | Integrity | SHA-256 of the bytes must match Meta's reported hash (hex or base64), or the file is discarded |
 | Error pages | An HTML response when media was expected is rejected |
 | Filenames | Sender filenames are reduced to a safe basename (`get_valid_filename`, path separators stripped, length capped). Paths are `whatsapp/YYYY/MM/<media_id>/<name>`, and existing files are never overwritten. |
-| No public serving | No `MEDIA_URL` route. Files leave only through the authenticated download endpoint, as `Content-Disposition: attachment` with `X-Content-Type-Options: nosniff` (Django `SecurityMiddleware`), so browsers download rather than render them. |
+| No public serving | No `MEDIA_URL` route. Files leave only through the authenticated download and preview endpoints. Downloads are `Content-Disposition: attachment`, so browsers save rather than render them. |
+| Inline previews | Previews run on the app's origin, in the session of a logged-in user, so a customer's HTML or SVG file could otherwise act as that user. Only the types in `media.PREVIEW_MIME_TYPES` are served inline (PDF, plain text, raster images, audio, video). The `Content-Type` comes from that allowlist, and `X-Content-Type-Options: nosniff` (Django `SecurityMiddleware`) stops browsers from reinterpreting the bytes. Everything else is download-only. Previews can be framed by the same origin only. |
 | Storage location | `MEDIA_ROOT` (default `./storage`) must not be inside a web server's static root |
 
 **Not yet done (recommended before production):**
-- malware scanning (for example ClamAV or a cloud scanning service) before files are offered for download;
+- malware scanning (for example ClamAV or a cloud scanning service) before files are offered for preview or download;
 - content-type sniffing to confirm the bytes match the declared MIME type;
 - encryption at rest for the storage volume or bucket.
 
@@ -114,7 +115,7 @@ Production checklist:
 | Replay of a captured webhook | Idempotent processing; needs a valid signature anyway |
 | Stolen API token | HTTPS only; revoke the token; per-user tokens; `sent_by` audit |
 | Brute-forcing the token endpoint | Strong passwords; proxy rate limiting (to add) |
-| Malicious file from a customer | Size limit, hash check, safe names, download-only serving; malware scanning still to add |
+| Malicious file from a customer | Size limit, hash check, safe names, inline previews only for types that can't run scripts on our origin; malware scanning still to add |
 | Path traversal via filename | Basename sanitisation; storage paths built from ids |
 | Leaked Meta token | Env-only storage; System User token with minimal scopes; rotation |
 | Data exposure in logs | Ids-only logging rules |

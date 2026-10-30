@@ -1,16 +1,34 @@
 from django.contrib import admin, messages
 from django.db.models import Count
+from django.urls import reverse
+from django.utils.html import format_html
 
 from . import media, processing
 from .models import Contact, ContactLevel, MediaAttachment, Message, MessageStatusEvent, WebhookEvent
+
+
+def file_links(attachment):
+    """Preview and Download links. Both go through the API, so only logged-in users get the file."""
+    if not attachment.pk:
+        return "-"
+    download = reverse("api:attachment-download", args=[attachment.pk])
+    if not media.preview_mime_type(attachment):
+        return format_html('<a href="{}">Download</a>', download)
+    preview = reverse("api:attachment-preview", args=[attachment.pk])
+    return format_html('<a href="{}" target="_blank" rel="noopener">Preview</a> | <a href="{}">Download</a>',
+                       preview, download)
 
 
 class MediaAttachmentInline(admin.TabularInline):
     model = MediaAttachment
     extra = 0
     can_delete = False
-    fields = ["media_type", "mime_type", "filename", "file", "download_status", "download_attempts", "last_error"]
+    fields = ["media_type", "mime_type", "filename", "links", "download_status", "download_attempts", "last_error"]
     readonly_fields = fields
+
+    @admin.display(description="File")
+    def links(self, obj):
+        return file_links(obj)
 
 
 class MessageStatusEventInline(admin.TabularInline):
@@ -60,11 +78,42 @@ class MessageAdmin(admin.ModelAdmin):
 
 @admin.register(MediaAttachment)
 class MediaAttachmentAdmin(admin.ModelAdmin):
-    list_display = ["id", "media_type", "mime_type", "file_size", "download_status", "download_attempts", "created_at"]
+    list_display = ["id", "links", "contact", "media_type", "filename", "file_size", "download_status", "created_at"]
     list_filter = ["download_status", "media_type"]
+    list_select_related = ["message__contact"]
     search_fields = ["media_id", "filename"]
     raw_id_fields = ["message"]
+    # `file` is left out: the stock widget links to a URL that doesn't exist, as media is never publicly served.
+    fields = ["preview", "links", "message", "media_id", "media_type", "mime_type", "sha256", "filename", "caption",
+              "file_size", "download_status", "download_attempts", "last_error", "downloaded_at"]
+    readonly_fields = ["preview", "links"]
     actions = ["save_file"]
+
+    @admin.display(description="Contact", ordering="message__contact")
+    def contact(self, obj):
+        return obj.message.contact
+
+    @admin.display(description="File")
+    def links(self, obj):
+        return file_links(obj)
+
+    @admin.display(description="Preview")
+    def preview(self, obj):
+        mime_type = media.preview_mime_type(obj)
+        if not obj.pk or not mime_type:
+            return "This file type can't be shown in the browser. Download it instead."
+        url = reverse("api:attachment-preview", args=[obj.pk])
+        kind = mime_type.split("/")[0]
+        if kind == "image":
+            return format_html('<img src="{}" alt="Preview not available" style="max-width:100%;max-height:70vh">', url)
+        if kind == "video":
+            return format_html('<video src="{}" controls preload="none" style="max-width:100%;max-height:70vh"></video>',
+                               url)
+        if kind == "audio":
+            return format_html('<audio src="{}" controls preload="none"></audio>', url)
+        # The admin's form column has no fixed width to take a percentage of, so size from the viewport.
+        return format_html('<iframe src="{}" title="File preview" '
+                           'style="width:max(320px,calc(100vw - 600px));height:70vh"></iframe>', url)
 
     @admin.action(description="Save file now (if the contact's level allows it)")
     def save_file(self, request, queryset):

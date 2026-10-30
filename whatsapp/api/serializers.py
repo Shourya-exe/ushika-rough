@@ -3,6 +3,7 @@ from django.urls import reverse
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from ..media import preview_mime_type
 from ..messaging import MEDIA_SEND_TYPES, SEND_TYPES, normalize_phone
 from ..models import Contact, MediaAttachment, Message, MessageStatusEvent
 
@@ -33,6 +34,7 @@ class ContactSummarySerializer(serializers.ModelSerializer):
 
 class MediaAttachmentSerializer(serializers.ModelSerializer):
     download_url = serializers.SerializerMethodField()
+    preview_url = serializers.SerializerMethodField()
 
     class Meta:
         model = MediaAttachment
@@ -51,16 +53,26 @@ class MediaAttachmentSerializer(serializers.ModelSerializer):
             "last_error",
             "downloaded_at",
             "download_url",
+            "preview_url",
             "created_at",
         ]
 
+    def _file_url(self, obj, view_name):
+        """Null when this user can't get the file: it isn't saved, and only superusers get unsaved files."""
+        request = self.context.get("request")
+        saved = obj.download_status == MediaAttachment.DownloadStatus.DOWNLOADED and obj.file
+        if not saved and not (request and request.user.is_superuser):
+            return None
+        url = reverse(view_name, args=[obj.pk])
+        return request.build_absolute_uri(url) if request else url
+
     @extend_schema_field(serializers.CharField(allow_null=True))
     def get_download_url(self, obj):
-        if obj.download_status != MediaAttachment.DownloadStatus.DOWNLOADED or not obj.file:
-            return None
-        url = reverse("api:attachment-download", args=[obj.pk])
-        request = self.context.get("request")
-        return request.build_absolute_uri(url) if request else url
+        return self._file_url(obj, "api:attachment-download")
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_preview_url(self, obj):
+        return self._file_url(obj, "api:attachment-preview") if preview_mime_type(obj) else None
 
 
 class MessageStatusEventSerializer(serializers.ModelSerializer):

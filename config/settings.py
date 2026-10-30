@@ -114,7 +114,7 @@ STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Downloaded WhatsApp media lives here. There is deliberately no public MEDIA_URL
-# route: files are only served through the authenticated attachment download API.
+# route: files are only served through the authenticated attachment download and preview API.
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", BASE_DIR / "storage"))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

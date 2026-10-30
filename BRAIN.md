@@ -8,6 +8,7 @@ USHIKA is a Django/DRF backend that integrates the **Meta WhatsApp Business Clou
 - receives messages and status webhooks
 - stores contacts, messages, statuses and attachment metadata
 - saves incoming images and PDFs to local storage on request, when the sender's contact level allows it (other media: superusers only)
+- lets superusers preview and download any file, saved or not, from the Django admin or the API
 - exposes everything through an authenticated REST API, including outbound sends.
 
 It is a POC. The definition of success (from the brief) is: a real WhatsApp message reaches USHIKA, is securely processed and stored, its attachment is saved locally, and the records can be fetched through authenticated REST endpoints. Outbound messaging, status tracking, error handling and Postman testing must also work.
@@ -17,7 +18,7 @@ It is a POC. The definition of success (from the brief) is: a real WhatsApp mess
 | Area | State |
 |---|---|
 | Phases 1–6 (setup → testing/deployment prep) | Implemented |
-| Automated tests | 60 passing (`python manage.py test whatsapp`), no network access |
+| Automated tests | 70 passing (`python manage.py test whatsapp`), no network access |
 | Live local smoke test | 17/17 checks against `runserver` with signed simulated webhooks |
 | OpenAPI schema | `manage.py spectacular --validate --fail-on-warn` passes |
 | `check --deploy` (DEBUG off) | Clean except the opt-in HSTS subdomains/preload warnings |
@@ -37,11 +38,11 @@ Open work and blockers: [docs/TASKS.md](docs/TASKS.md).
 | `whatsapp/webhooks.py` | `GET` handshake and `POST` receiver; the plain Django view that reads the raw body |
 | `whatsapp/processing.py` | Payload → rows, duplicate prevention, forward-only status updates, orphan-status reconciliation |
 | `whatsapp/client.py` | **Only** module that calls `graph.facebook.com`; `WhatsAppAPIError` |
-| `whatsapp/media.py` | `save_refusal` (who may save which media) and media lookup → stream → size/hash/HTML checks → save via Django storage |
+| `whatsapp/media.py` | `save_refusal` (who may save which media), media lookup → stream → size/hash/HTML checks → save via Django storage, `fetch_unsaved` (same checks, nothing stored), `preview_mime_type` (what may be shown inline) |
 | `whatsapp/messaging.py` | Outbound payload building, sending, idempotency, recording results |
 | `whatsapp/tasks.py` | `download_media_task` and `schedule_media_download` (Celery or inline, after commit) |
 | `whatsapp/api/` | DRF serializers, viewsets, router (`/api/v1/`), pagination |
-| `whatsapp/admin.py` | Admin (including contact levels), plus the "Save file" and "Reprocess" actions |
+| `whatsapp/admin.py` | Admin (including contact levels), file previews and download links, plus the "Save file" and "Reprocess" actions |
 | `whatsapp/management/commands/` | `reprocess_webhooks`, `retry_media_downloads` |
 | `whatsapp/tests/` | `helpers.py` (payload builders, signed-webhook test case) and per-area tests |
 
@@ -54,11 +55,11 @@ Open work and blockers: [docs/TASKS.md](docs/TASKS.md).
 5. **Every write path is idempotent.** Messages are unique on `wa_message_id`, status events on `(wa_message_id, status, timestamp)`, webhook deliveries on the body SHA-256. Catch `IntegrityError` inside a savepoint for concurrent duplicates.
 6. **Outbound status only moves forward**, by `Message.STATUS_RANK`, using a conditional `UPDATE`. Unknown status values are stored as events only.
 7. **Never auto-retry an outbound send (POST).** It can double-deliver. Clients use `idempotency_key` instead. Only GETs (media) retry.
-8. **Media is never publicly served.** There is no `MEDIA_URL` route. Files leave only through `GET /api/v1/attachments/{id}/download/`, which requires auth.
+8. **Media is never publicly served.** There is no `MEDIA_URL` route. Files leave only through `GET /api/v1/attachments/{id}/download/` and `/preview/`, which require auth; the admin links to them instead of serving files itself. Only types in `media.PREVIEW_MIME_TYPES` are shown inline. Never add one that can carry scripts (HTML, SVG, XML): it would run on our origin in an admin's session.
 9. **Background work is scheduled with `transaction.on_commit(..., robust=True)`** via `tasks.schedule_media_download`. It runs on Celery when `USE_CELERY`, otherwise inline.
 10. **No secrets, tokens, phone numbers or message text in logs.** Log ids (`wamid`, pk, media id) and error codes.
 11. Store every send *before* calling Meta, so failures are kept with Meta's error.
-12. **Every path that saves a media file checks `media.save_refusal` first**: the API `save` action, the admin action, `retry_media_downloads` and on-arrival download. Images and PDFs follow the contact's `ContactLevel`; other media needs a superuser.
+12. **Every path that saves a media file checks `media.save_refusal` first**: the API `save` action, the admin action, `retry_media_downloads` and on-arrival download. Images and PDFs follow the contact's `ContactLevel`; other media needs a superuser. A superuser previewing or downloading an unsaved file stores nothing (`media.fetch_unsaved`), so the level doesn't apply.
 
 ## Key decisions (full list in [docs/DECISIONS.md](docs/DECISIONS.md))
 

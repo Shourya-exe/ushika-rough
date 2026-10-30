@@ -1,9 +1,12 @@
 import base64
 import hashlib
+import os
 from io import StringIO
 
 import responses
+from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.files.base import ContentFile
 from django.core.management import call_command
 from rest_framework.test import APIClient
 
@@ -265,3 +268,196 @@ class SaveRulesTests(WhatsAppTestCase):
         self.assertIn("does not allow saving images", stderr.getvalue())
         attachment.refresh_from_db()
         self.assertEqual(attachment.download_status, MediaAttachment.DownloadStatus.SKIPPED)
+
+
+class AdminFileAccessTests(WhatsAppTestCase):
+    """Superusers can preview and download any file without it being saved. The contact here has no level."""
+
+    def setUp(self):
+        Contact.objects.create(wa_id=CUSTOMER)
+        self.superuser = get_user_model().objects.create_superuser("root")
+        self.operator = APIClient()
+        self.operator.force_authenticate(get_user_model().objects.create_user("operator"))
+        self.admin = APIClient()
+        self.admin.force_authenticate(self.superuser)
+
+    def receive(self, message):
+        with whatsapp_settings(DOWNLOAD_MEDIA=False), responses.RequestsMock():
+            self.post_webhook(envelope(contacts=[contact_entry()], messages=[message]))
+        return MediaAttachment.objects.get(message__wa_message_id=message["id"])
+
+    def get_file(self, client, attachment, action):
+        response = client.get(f"/api/v1/attachments/{attachment.pk}/{action}/")
+        self.addCleanup(response.close)
+        return response
+
+    def assert_not_saved(self, attachment):
+        attachment.refresh_from_db()
+        self.assertEqual(attachment.download_status, MediaAttachment.DownloadStatus.SKIPPED)
+        self.assertEqual(attachment.download_attempts, 0)
+        self.assertEqual(attachment.last_error, "")
+        self.assertFalse(attachment.file)
+
+    def stored_file_count(self):
+        return sum(len(files) for _, _, files in os.walk(settings.MEDIA_ROOT))
+
+    def test_superuser_previews_an_unsaved_image_and_nothing_is_stored(self):
+        attachment = self.receive(image_message())
+        stored_before = self.stored_file_count()
+        with responses.RequestsMock() as rsps:
+            mock_media(rsps, "111222333", JPEG)
+            response = self.get_file(self.admin, attachment, "preview")
+
+            self.assertEqual(response.status_code, 200, getattr(response, "content", b""))
+            self.assertEqual(b"".join(response.streaming_content), JPEG)
+        self.assertEqual(response["Content-Type"], "image/jpeg")
+        self.assertEqual(response["Content-Disposition"], 'inline; filename="image_111222333.jpg"')
+        self.assertEqual(response["X-Frame-Options"], "SAMEORIGIN")
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+        self.assert_not_saved(attachment)
+        self.assertEqual(self.stored_file_count(), stored_before)
+
+    def test_superuser_downloads_a_file_type_that_cannot_be_previewed(self):
+        attachment = self.receive(document_message(media_id="555", filename="notes.docx", mime_type=DOCX))
+        with responses.RequestsMock():
+            response = self.get_file(self.admin, attachment, "preview")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "This file type can't be previewed. Download it instead.")
+
+        with responses.RequestsMock() as rsps:
+            mock_media(rsps, "555", b"fake-docx-bytes", mime_type=DOCX)
+            response = self.get_file(self.admin, attachment, "download")
+            self.assertEqual(b"".join(response.streaming_content), b"fake-docx-bytes")
+        self.assertEqual(response["Content-Type"], DOCX)
+        self.assertEqual(response["Content-Disposition"], 'attachment; filename="notes.docx"')
+        self.assert_not_saved(attachment)
+
+    def test_other_users_cannot_get_unsaved_files(self):
+        attachment = self.receive(image_message())
+        with responses.RequestsMock():  # any call to Meta would fail the test
+            for action in ("preview", "download"):
+                response = self.get_file(self.operator, attachment, action)
+                self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json()["detail"], "This attachment has not been downloaded.")
+
+    def test_saved_file_is_previewed_from_storage_by_any_user(self):
+        attachment = self.receive(document_message())
+        attachment.download_status = MediaAttachment.DownloadStatus.DOWNLOADED
+        attachment.file.save("report.pdf", ContentFile(PDF), save=True)
+
+        with responses.RequestsMock():
+            response = self.get_file(self.operator, attachment, "preview")
+            self.assertEqual(b"".join(response.streaming_content), PDF)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertEqual(response["Content-Disposition"], 'inline; filename="report.pdf"')
+
+    def test_files_that_can_carry_scripts_are_only_ever_downloaded(self):
+        for index, (mime_type, name) in enumerate([
+            ("text/html", "page.html"),
+            ("text/html; charset=utf-8", "page.htm"),
+            ("image/svg+xml", "logo.svg"),
+            ("application/xhtml+xml", "page.xhtml"),
+            ("text/xml", "data.xml"),
+            ("", "unknown"),
+        ]):
+            attachment = self.receive(document_message(
+                wamid=f"wamid.SCRIPT{index}", media_id=f"70{index}", filename=name, mime_type=mime_type
+            ))
+            with responses.RequestsMock():
+                response = self.get_file(self.admin, attachment, "preview")
+            self.assertEqual(response.status_code, 404, mime_type)
+            self.assertIsNone(self.admin.get(f"/api/v1/attachments/{attachment.pk}/").json()["preview_url"])
+
+        attachment = MediaAttachment.objects.get(media_id="702")
+        body = b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"
+        with responses.RequestsMock() as rsps:
+            mock_media(rsps, "702", body, mime_type="image/svg+xml")
+            response = self.get_file(self.admin, attachment, "download")
+            self.assertEqual(b"".join(response.streaming_content), body)
+        self.assertEqual(response["Content-Disposition"], 'attachment; filename="logo.svg"')
+
+    def test_preview_sends_the_allowed_type_without_its_parameters(self):
+        attachment = self.receive(audio_message())
+        self.assertEqual(attachment.mime_type, "audio/ogg; codecs=opus")
+        with responses.RequestsMock() as rsps:
+            mock_media(rsps, "888999000", OGG, mime_type="audio/ogg; codecs=opus")
+            response = self.get_file(self.admin, attachment, "preview")
+            self.assertEqual(b"".join(response.streaming_content), OGG)
+        self.assertEqual(response["Content-Type"], "audio/ogg")
+
+    def test_failed_fetch_is_a_502_and_changes_nothing(self):
+        attachment = self.receive(image_message())
+        with responses.RequestsMock() as rsps:
+            mock_media(rsps, "111222333", JPEG, sha256="0" * 64)
+            response = self.get_file(self.admin, attachment, "preview")
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("SHA-256", response.json()["detail"])
+        self.assert_not_saved(attachment)
+
+        with responses.RequestsMock() as rsps:  # for example, Meta no longer holds the file
+            rsps.get(f"{GRAPH}/111222333", status=404, json={"error": {"message": "Media not found", "code": 100}})
+            response = self.get_file(self.admin, attachment, "download")
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "Media not found")
+        self.assert_not_saved(attachment)
+
+    def test_urls_show_what_this_user_can_get(self):
+        image = self.receive(image_message())
+        word = self.receive(document_message(wamid="wamid.DOC2", media_id="555", filename="notes.docx", mime_type=DOCX))
+
+        def urls(client, attachment):
+            data = client.get(f"/api/v1/attachments/{attachment.pk}/").json()
+            return data["download_url"], data["preview_url"]
+
+        self.assertEqual(urls(self.operator, image), (None, None))
+        self.assertEqual(urls(self.operator, word), (None, None))
+        download, preview = urls(self.admin, image)
+        self.assertTrue(download.endswith(f"/api/v1/attachments/{image.pk}/download/"))
+        self.assertTrue(preview.endswith(f"/api/v1/attachments/{image.pk}/preview/"))
+        download, preview = urls(self.admin, word)
+        self.assertTrue(download.endswith(f"/api/v1/attachments/{word.pk}/download/"))
+        self.assertIsNone(preview)
+
+    def test_admin_session_can_open_the_preview(self):
+        attachment = self.receive(image_message())
+        self.assertEqual(self.get_file(self.client, attachment, "preview").status_code, 401)
+
+        self.client.force_login(self.superuser)
+        with responses.RequestsMock() as rsps:
+            mock_media(rsps, "111222333", JPEG)
+            response = self.get_file(self.client, attachment, "preview")
+            self.assertEqual(b"".join(response.streaming_content), JPEG)
+
+    def test_admin_pages_show_previews_and_links(self):
+        image = self.receive(image_message())
+        pdf = self.receive(document_message())
+        word = self.receive(document_message(wamid="wamid.DOC2", media_id="555", filename="notes.docx", mime_type=DOCX))
+        voice = self.receive(audio_message())
+        self.client.force_login(self.superuser)
+
+        def preview_url(attachment):
+            return f"/api/v1/attachments/{attachment.pk}/preview/"
+
+        def download_url(attachment):
+            return f"/api/v1/attachments/{attachment.pk}/download/"
+
+        with responses.RequestsMock():  # rendering a page must not fetch anything from Meta
+            changelist = self.client.get("/admin/whatsapp/mediaattachment/")
+            self.assertContains(changelist, preview_url(image))
+            self.assertContains(changelist, download_url(image))
+            self.assertContains(changelist, download_url(word))
+            self.assertNotContains(changelist, preview_url(word))
+
+            def change_page(attachment):
+                return self.client.get(f"/admin/whatsapp/mediaattachment/{attachment.pk}/change/")
+
+            self.assertContains(change_page(image), f'<img src="{preview_url(image)}"')
+            self.assertContains(change_page(pdf), f'<iframe src="{preview_url(pdf)}"')
+            self.assertContains(change_page(voice), f'<audio src="{preview_url(voice)}"')
+            self.assertContains(change_page(word), "be shown in the browser")
+            self.assertContains(change_page(word), download_url(word))
+
+            self.assertEqual(self.client.get("/admin/whatsapp/mediaattachment/add/").status_code, 200)
+            message_page = self.client.get(f"/admin/whatsapp/message/{image.message_id}/change/")
+            self.assertContains(message_page, preview_url(image))
+            self.assertContains(message_page, download_url(image))

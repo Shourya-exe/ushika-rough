@@ -1431,6 +1431,38 @@
           ]
         },
         {
+          "name": "Preview file",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/attachments/{{attachment_id}}/preview/",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "attachments",
+                "{{attachment_id}}",
+                "preview"
+              ]
+            },
+            "description": "Shows the file inline. Superusers also get files that aren't saved, fetched from WhatsApp and not kept."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 inline file, or 404 if unavailable or not previewable', () => pm.expect(pm.response.code).to.be.oneOf([200, 404]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "Save file (contact level rules)",
           "request": {
             "method": "POST",

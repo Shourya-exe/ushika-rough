@@ -31,6 +31,25 @@ CHUNK_SIZE = 64 * 1024
 # WhatsApp types that mimetypes misses or names oddly (stickers are webp, voice notes ogg/opus).
 PREFERRED_EXTENSIONS = {"image/jpeg": ".jpg", "image/webp": ".webp", "audio/ogg": ".ogg", "audio/opus": ".opus"}
 
+# What a browser may show inline. Previews come from the app's own origin to a logged-in user, so
+# never add a type that can carry scripts (HTML, SVG, XML): those files can only be downloaded.
+PREVIEW_MIME_TYPES = {
+    "application/pdf",
+    "text/plain",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "video/mp4",
+    "video/webm",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/aac",
+    "audio/ogg",
+    "audio/opus",
+    "audio/wav",
+}
+
 
 class MediaDownloadError(Exception):
     def __init__(self, message, *, retryable=False):
@@ -72,6 +91,29 @@ def save_refusal(attachment: MediaAttachment, *, admin: bool) -> str:
     return ""
 
 
+def preview_mime_type(attachment: MediaAttachment) -> str:
+    """The attachment's MIME type without parameters if a browser may show it inline, otherwise ""."""
+    mime_type = attachment.mime_type.split(";")[0].strip().lower()
+    return mime_type if mime_type in PREVIEW_MIME_TYPES else ""
+
+
+def fetch_unsaved(attachment: MediaAttachment, client: WhatsAppClient | None = None):
+    """Fetch a file from WhatsApp with the usual checks, without saving it or changing the attachment.
+
+    Returns a temp file, deleted when closed, and its MIME type. Raises MediaDownloadError.
+    """
+    client = client or WhatsAppClient()
+    tmp = tempfile.TemporaryFile()
+    try:
+        mime_type, _ = _fetch(attachment, client, tmp)
+    except (WhatsAppAPIError, MediaDownloadError, requests.RequestException, OSError) as exc:
+        tmp.close()
+        logger.warning("Media %s unsaved fetch failed: %s", attachment.media_id, exc)
+        raise MediaDownloadError(str(exc)) from exc
+    tmp.seek(0)
+    return tmp, mime_type
+
+
 def download_attachment(attachment: MediaAttachment, client: WhatsAppClient | None = None) -> DownloadOutcome:
     """Download one attachment. The result is always recorded on the attachment; nothing is raised."""
     if attachment.download_status == MediaAttachment.DownloadStatus.DOWNLOADED and attachment.file:
@@ -108,6 +150,19 @@ def download_attachment(attachment: MediaAttachment, client: WhatsAppClient | No
 
 
 def _download(attachment: MediaAttachment, client: WhatsAppClient) -> None:
+    with tempfile.TemporaryFile() as tmp:
+        mime_type, size = _fetch(attachment, client, tmp)
+        tmp.seek(0)
+        django_file = File(tmp, name=safe_filename(attachment, mime_type))
+        django_file.size = size
+        attachment.file.save(django_file.name, django_file, save=False)
+
+    attachment.mime_type = mime_type
+    attachment.file_size = size
+
+
+def _fetch(attachment: MediaAttachment, client: WhatsAppClient, out) -> tuple[str, int]:
+    """Stream the file into `out`, enforcing the size limit, HTML check and hash. Returns (mime_type, size)."""
     max_bytes = settings.WHATSAPP["MEDIA_MAX_BYTES"]
     info = client.get_media_info(attachment.media_id)
     url = info.get("url")
@@ -121,26 +176,18 @@ def _download(attachment: MediaAttachment, client: WhatsAppClient) -> None:
         raise MediaDownloadError(f"File is {declared_size} bytes; the limit is {max_bytes}")
 
     response = client.open_media_stream(url)
-    with tempfile.TemporaryFile() as tmp:
-        try:
-            content_type = response.headers.get("Content-Type", "")
-            if content_type.startswith("text/html") and not mime_type.startswith("text/html"):
-                # Meta answers expired or unauthorised media URLs with an HTML error page.
-                raise MediaDownloadError("Got an HTML page instead of the media file", retryable=True)
-            size, digest = _copy_limited(response, tmp, max_bytes)
-        finally:
-            response.close()
+    try:
+        content_type = response.headers.get("Content-Type", "")
+        if content_type.startswith("text/html") and not mime_type.startswith("text/html"):
+            # Meta answers expired or unauthorised media URLs with an HTML error page.
+            raise MediaDownloadError("Got an HTML page instead of the media file", retryable=True)
+        size, digest = _copy_limited(response, out, max_bytes)
+    finally:
+        response.close()
 
-        if expected_sha256 and _sha256_matches(expected_sha256, digest) is False:
-            raise MediaDownloadError("SHA-256 of the downloaded file does not match WhatsApp's", retryable=True)
-
-        tmp.seek(0)
-        django_file = File(tmp, name=safe_filename(attachment, mime_type))
-        django_file.size = size
-        attachment.file.save(django_file.name, django_file, save=False)
-
-    attachment.mime_type = mime_type
-    attachment.file_size = size
+    if expected_sha256 and _sha256_matches(expected_sha256, digest) is False:
+        raise MediaDownloadError("SHA-256 of the downloaded file does not match WhatsApp's", retryable=True)
+    return mime_type, size
 
 
 def _copy_limited(response, out, max_bytes: int) -> tuple[int, bytes]:

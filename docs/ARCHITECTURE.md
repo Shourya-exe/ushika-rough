@@ -33,11 +33,11 @@ USHIKA is one Django project (`config/`) with one app (`whatsapp/`). Inside the 
 | `security.py` | `is_valid_verify_token`, `is_valid_signature`, `compute_signature`. Constant-time comparisons. | settings |
 | `processing.py` | Walks `entry[].changes[]`, stores inbound messages and contacts, creates attachments, records statuses, applies forward-only status changes, links orphan statuses. All writes are idempotent. | models, `tasks` |
 | `tasks.py` | `schedule_media_download` (after commit) and `download_media_task` (Celery task, also callable inline). | `media` |
-| `media.py` | Who may save which media (`save_refusal`: contact level for images and PDFs, superuser for the rest), media lookup, streaming download, size limit, SHA-256 and HTML checks, safe filenames, save through Django storage, outcome recording. | `client`, storage |
+| `media.py` | Who may save which media (`save_refusal`: contact level for images and PDFs, superuser for the rest), media lookup, streaming download, size limit, SHA-256 and HTML checks, safe filenames, save through Django storage, outcome recording. Also `fetch_unsaved` (same checks, nothing stored) and `preview_mime_type` (what may be shown inline). | `client`, storage |
 | `client.py` | `WhatsAppClient`: the only HTTP access to Meta. Bearer auth, timeouts, GET retries, Graph error parsing into `WhatsAppAPIError`. | Meta Graph API |
 | `messaging.py` | Builds Cloud API message payloads, stores the message, sends, records the `wamid` or the error, handles idempotency keys. | `client`, `processing` |
-| `api/` | DRF viewsets, serializers, filters, pagination, router (`/api/v1/`). Read APIs, send, download, save, login check. | models, `messaging`, `media` |
-| `admin.py` | Operator UI with contact levels and the save-file and reprocess actions. | models, `media`, `processing` |
+| `api/` | DRF viewsets, serializers, filters, pagination, router (`/api/v1/`). Read APIs, send, preview, download, save, login check. | models, `messaging`, `media` |
+| `admin.py` | Operator UI with contact levels, file previews and download links (served by `api/`), and the save-file and reprocess actions. | models, `media`, `processing` |
 | `management/commands/` | `reprocess_webhooks`, `retry_media_downloads`. | `processing`, `media` |
 | `config/celery.py` | Celery app (used only when `USE_CELERY=true`). | Redis |
 
@@ -237,7 +237,7 @@ Indexes: `wa_message_id`, `wa_id`, `(contact, -timestamp)`, `direction`, `status
 
 - Files are written through Django's **default storage** (`FileField` + `STORAGES`), rooted at `MEDIA_ROOT` (default `./storage`).
 - Path layout: `whatsapp/<YYYY>/<MM>/<media_id>/<filename>`. Name collisions get a random suffix and never overwrite.
-- **Nothing is publicly served.** There is no `MEDIA_URL` route; downloads go through the authenticated API.
+- **Nothing is publicly served.** There is no `MEDIA_URL` route; previews and downloads go through the authenticated API.
 - Moving to S3, GCS or Azure is a configuration change (`django-storages` + `STORAGES["default"]`); `media.py` needs no code change. See [DECISIONS.md](DECISIONS.md#d3-local-filesystem-media-through-djangos-storage-api).
 
 ## 10. Background processing

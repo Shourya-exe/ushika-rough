@@ -9,8 +9,8 @@ USHIKA is a Django REST backend that connects the official **Meta WhatsApp Busin
 - **Webhook receiver**: Meta's subscription handshake (`hub.challenge`) plus event delivery, with every POST checked against the `X-Hub-Signature-256` HMAC.
 - **Persistence**: contacts, inbound and outbound messages, attachment metadata, delivery-status history, and a raw audit copy of every webhook delivery.
 - **Duplicate-safe processing**: redelivered payloads, repeated messages (same `wamid`) and repeated statuses are each stored once, including under concurrent deliveries.
-- **Media management**: inbound media is recorded on arrival and saved on request through the API. Images and PDFs are saved only when the sender's **contact level** allows them; other media (audio, video, stickers, other documents) only by a superuser. Each download is checked against a size limit and the SHA-256 Meta reports, then saved to local disk under `storage/`. Failed saves can be retried.
-- **REST API** under `/api/v1/`: log in and check the login; list, filter and search messages, contacts, attachments and statuses; save and download files; send text, template and media messages, with optional idempotency keys.
+- **Media management**: inbound media is recorded on arrival and saved on request through the API. Images and PDFs are saved only when the sender's **contact level** allows them; other media (audio, video, stickers, other documents) only by a superuser. Each download is checked against a size limit and the SHA-256 Meta reports, then saved to local disk under `storage/`. Failed saves can be retried. Superusers can preview and download any file from the admin or the API without saving it.
+- **REST API** under `/api/v1/`: log in and check the login; list, filter and search messages, contacts, attachments and statuses; save, preview and download files; send text, template and media messages, with optional idempotency keys.
 - **Status tracking**: `sent → delivered → read` (or `failed`) updates move each message forward and never backwards. Meta's error details are kept on failure.
 - **Failure handling**: invalid signatures are rejected; processing failures are kept and can be replayed; media downloads retry. Outbound failures are stored along with Meta's error code.
 - **Tooling**: OpenAPI docs at `/api/docs/`, a Postman collection, Django admin, a 51-test suite, and optional Celery workers.
@@ -159,6 +159,14 @@ A contact's **level** decides whether their images and PDFs can be saved. Nothin
 3. Save a file with `POST /api/v1/attachments/{id}/save/`. If it isn't allowed, the API returns `403` with the reason. Audio, video, stickers and non-PDF documents can only be saved by a superuser.
 
 The rules are in [docs/API.md](docs/API.md#saving-media-contact-levels).
+
+## Previewing and downloading files
+
+Log in to the admin as a superuser and open **Whatsapp → Media attachments**. Every row has a **Download** link, and a **Preview** link if a browser can show the file: PDFs, images, plain text, audio and video. Opening a row shows the preview on its page. A message's page has the same links for its attachments.
+
+This works for any file, whatever the contact's level. A file that isn't saved is fetched from WhatsApp when you open it and isn't kept, so it needs a valid access token and only works while Meta holds the file (about 30 days). Save a file if it must stay available for longer. Word, Excel and PowerPoint files can be downloaded but not previewed, and so can HTML and SVG files, for security.
+
+Other users can only preview and download saved files. See [docs/API.md](docs/API.md#previewing-and-downloading).
 
 ## Running tests
 

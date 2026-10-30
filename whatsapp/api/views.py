@@ -8,7 +8,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view
-from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied
 from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.response import Response
 
@@ -40,6 +40,11 @@ class BinaryRenderer(BaseRenderer):
 
     def render(self, data, accepted_media_type=None, renderer_context=None):
         return data if isinstance(data, bytes) else json.dumps(data).encode()
+
+
+class MediaFetchFailed(APIException):
+    status_code = status.HTTP_502_BAD_GATEWAY
+    default_detail = "Could not fetch the file from WhatsApp."
 
 
 class MessageFilter(django_filters.FilterSet):
@@ -132,22 +137,43 @@ class MediaAttachmentViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ["download_status", "media_type", "message"]
     ordering_fields = ["created_at", "downloaded_at"]
 
-    @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY, 404: None})
-    @action(detail=True, methods=["get"], renderer_classes=[JSONRenderer, BinaryRenderer])
-    def download(self, request, pk=None):
-        attachment = self.get_object()
-        if attachment.download_status != MediaAttachment.DownloadStatus.DOWNLOADED or not attachment.file:
+    def _open_file(self, attachment):
+        """(handle, filename, mime type) from storage, or for a superuser straight from WhatsApp if not saved."""
+        if attachment.download_status == MediaAttachment.DownloadStatus.DOWNLOADED and attachment.file:
+            try:
+                handle = attachment.file.open("rb")
+            except FileNotFoundError:
+                raise NotFound("The stored file is missing from storage.")
+            return handle, os.path.basename(attachment.file.name), attachment.mime_type
+        if not self.request.user.is_superuser:
             raise NotFound("This attachment has not been downloaded.")
         try:
-            handle = attachment.file.open("rb")
-        except FileNotFoundError:
-            raise NotFound("The stored file is missing from storage.")
+            handle, mime_type = media.fetch_unsaved(attachment)
+        except media.MediaDownloadError as exc:
+            raise MediaFetchFailed(str(exc))
+        return handle, media.safe_filename(attachment, mime_type), mime_type
+
+    @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY, 404: None, 502: None})
+    @action(detail=True, methods=["get"], renderer_classes=[JSONRenderer, BinaryRenderer])
+    def download(self, request, pk=None):
+        """The file, as a download. Superusers also get files that aren't saved, fetched from WhatsApp and not kept."""
+        handle, filename, mime_type = self._open_file(self.get_object())
         return FileResponse(
-            handle,
-            as_attachment=True,
-            filename=os.path.basename(attachment.file.name),
-            content_type=attachment.mime_type or "application/octet-stream",
+            handle, as_attachment=True, filename=filename, content_type=mime_type or "application/octet-stream"
         )
+
+    @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY, 404: None, 502: None})
+    @action(detail=True, methods=["get"], renderer_classes=[JSONRenderer, BinaryRenderer])
+    def preview(self, request, pk=None):
+        """The file, for showing in the browser. Same access as download; only safe types (see preview_url)."""
+        attachment = self.get_object()
+        preview_type = media.preview_mime_type(attachment)
+        if not preview_type:
+            raise NotFound("This file type can't be previewed. Download it instead.")
+        handle, filename, _ = self._open_file(attachment)
+        response = FileResponse(handle, filename=filename, content_type=preview_type)
+        response["X-Frame-Options"] = "SAMEORIGIN"  # the admin embeds PDFs and text files in a frame
+        return response
 
     @extend_schema(
         request=None,

@@ -96,3 +96,10 @@ Each entry records the context, the decision, what it costs, and when to reconsi
 **Decision.** Inbound media is recorded on arrival but not downloaded (`WHATSAPP_DOWNLOAD_MEDIA=false` by default). `POST /api/v1/attachments/{id}/save/` fetches it. `media.save_refusal` is the single rule: images need the contact's `ContactLevel.can_save_images`, PDFs (`application/pdf` documents) need `can_save_pdfs`, and all other media needs a superuser. Levels are rows edited in the admin, so the rules change without code. The API save, the admin action, `retry_media_downloads` and the optional on-arrival download all check it.
 **Consequences.** Nothing is stored for a contact without a level. Files must be saved while Meta still holds them (about 30 days). The PDF check trusts the MIME type WhatsApp reports. Superusers follow the level rules for images and PDFs too.
 **Revisit when.** API users need their own levels (then add Django permissions or groups on top), or files must be checked by content rather than MIME type.
+
+## D19. Superusers preview and download any file without saving it
+**Context.** Admins must be able to view any customer file and download the ones they choose, but contact levels (D18) forbid storing some files, even for superusers.
+**Decision.** Levels keep deciding what is stored. For a superuser, `preview` and `download` on an unsaved attachment fetch the file from Meta into a temp file with the usual checks, serve it, and discard it. `preview` serves only `media.PREVIEW_MIME_TYPES` inline: never HTML, SVG or XML, which could run scripts on the app's origin in an admin's session. The admin links to these endpoints, so files are served from one place only.
+**Consequences.** An unsaved file can only be viewed while Meta holds it (about 30 days) and while the access token is valid, and each view downloads it again. Word, Excel and PowerPoint files have no preview.
+**Revisit when.** Office files need previews (convert on the server, for example with LibreOffice; don't send customer files to an online viewer), or files must stay viewable after Meta's retention without being saved under the level rules.
+

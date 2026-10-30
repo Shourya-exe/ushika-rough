@@ -49,6 +49,7 @@ Legend: ✅ done · 🔲 open · ⛔ blocked (needs something outside the codeba
 - ✅ Configurable media types (others `skipped`), attempt counting, `last_error`.
 - ✅ Retry paths: API `POST /attachments/{id}/save/`, admin action, `retry_media_downloads`, and Celery backoff.
 - ✅ Contact levels (2026-10-28): media saved on request; images and PDFs only when the contact's level allows; other media superuser-only. Download on arrival is now off by default (`WHATSAPP_DOWNLOAD_MEDIA=false`).
+- ✅ Admin file access (2026-10-30): superusers preview and download any file from the admin or the API; unsaved files are fetched from Meta and not kept.
 - ⛔ Verify against a real inbound image and document (needs credentials).
 
 **Done when:** a real attachment is saved under `storage/` and downloadable through the API.

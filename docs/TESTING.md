@@ -22,7 +22,7 @@ The tests run against an in-memory test database. They use a temporary `MEDIA_RO
 |---|---|
 | `test_webhook.py` | Handshake (correct, wrong and unconfigured token; bad mode; missing challenge). Signatures (missing, wrong secret, tampered body, no secret configured). Invalid JSON. Event storage. Identical redelivery reported as `duplicate`. Processing failure still returns 200, is recorded, and is replayed by `reprocess_webhooks`. Redelivery of a failed event. Non-message fields ignored. |
 | `test_processing.py` | Text message → contact and message fields. Profile-name updates. Same `wamid` in another envelope stored once. Malformed entries skipped. Body extraction for interactive, location, reaction and button. Reply context. Unsupported type keeps Meta's error. Statuses advance and never go backwards. Failed status stores the error. Duplicate status ignored. Unknown status values. Orphan status linked after a send. |
-| `test_media.py` | Image downloaded and stored (path, bytes, size, Bearer token on both calls). Document filename sanitised (`../../`). Base64 SHA-256 accepted. Hash mismatch → failed with no file. Size limit, both declared and while streaming. HTML error page rejected. Failed download recovered through the save endpoint. Disabled type → `skipped` with no HTTP call. Retry command respects the attempt cap. Sticker and voice-note extensions. Save rules: nothing fetched on arrival by default; image saved on request when the level allows it; images and PDFs allowed separately; no level → refused even for a superuser; audio and Word files superuser-only; only `application/pdf` documents count as PDFs; download on arrival follows the same rules; the retry command honours the level. |
+| `test_media.py` | Image downloaded and stored (path, bytes, size, Bearer token on both calls). Document filename sanitised (`../../`). Base64 SHA-256 accepted. Hash mismatch → failed with no file. Size limit, both declared and while streaming. HTML error page rejected. Failed download recovered through the save endpoint. Disabled type → `skipped` with no HTTP call. Retry command respects the attempt cap. Sticker and voice-note extensions. Save rules: nothing fetched on arrival by default; image saved on request when the level allows it; images and PDFs allowed separately; no level → refused even for a superuser; audio and Word files superuser-only; only `application/pdf` documents count as PDFs; download on arrival follows the same rules; the retry command honours the level. Admin file access: a superuser previews and downloads unsaved files with nothing stored; other users get 404; saved files preview from storage; HTML, SVG, XML and unknown types are never inline; Meta failures → 502 with the attachment unchanged; `download_url` and `preview_url` follow the user; admin pages show previews and links without calling Meta. |
 | `test_api.py` | 401 without a token on every endpoint. Token endpoint. Log in, then `auth/me/` names the user. Wrong password and bad token rejected. Health is public. List, filter, search, ordering and paging of messages. Detail includes attachments and status history. Contact counts, level and level filter. File download headers and bytes. 404 for not-downloaded files. OpenAPI schema. Send text (exact payload to Meta), template, document. Meta rejection → 502 and stored as failed. Idempotency key → one call to Meta. Ten validation-error cases. |
 
 Payload builders that mirror Meta's webhook shapes live in `whatsapp/tests/helpers.py` (`envelope`, `text_message`, `image_message`, `document_message`, `status_entry`, `mock_media`). Use them in new tests.
@@ -60,7 +60,7 @@ $env:DJANGO_DEBUG="false"; python manage.py check --deploy  # needs DJANGO_SECRE
 | 1. Webhook (simulate Meta) | Handshake (good and wrong token); inbound text, image, document, button reply; duplicate delivery (send it twice, and the second answer is `duplicate`); `delivered`, `read` and `failed` statuses for your last sent message; forged signature → 403 |
 | 2. Messages | List, filter, search, time window, detail, status history; send text, `hello_world` template, image by link, reply to the last inbound; idempotent retry (send twice); validation error |
 | 3. Contacts | List and search |
-| 4. Attachments | List, failed only, detail, download (use **Send and Download**), save (contact level rules) |
+| 4. Attachments | List, failed only, detail, download (use **Send and Download**), preview, save (contact level rules) |
 | 5. Delivery statuses | List; filter by the last sent `wamid` |
 
 **How the webhook signing works.** The *1. Webhook* folder's pre-request script does three things:
@@ -129,9 +129,11 @@ This is the end-to-end proof from the PRD. Prerequisites:
    - [ ] it arrives, quoted if `reply_to` was set
 6. **Inbound image:** in the admin, give your contact a level that allows images and PDFs (**Contact levels**, then the **Level** column under **Contacts**). Send a photo with a caption, then `POST /api/v1/attachments/{id}/save/`.
    - [ ] before the save the attachment is `skipped`; after it, `downloaded`, the file is under `storage/whatsapp/YYYY/MM/<media_id>/`, and `GET …/download/` returns the image
+   - [ ] before the save, a superuser can see the image under **Media attachments** in the admin, and it is still `skipped` with nothing under `storage/`
 7. **Inbound document:** send a PDF and save it.
    - [ ] downloaded with its original (sanitised) filename
    - [ ] with *can save PDFs* unticked, the save returns 403 and nothing is stored
+   - [ ] even then, a superuser can read the PDF in the admin's preview and download it
 8. **Failure paths:**
    - [ ] a send to an unverified number → 502 with `error_code` 131030
    - [ ] a free-form text more than 24 hours after the last inbound → `failed` (131047), via webhook or 502
